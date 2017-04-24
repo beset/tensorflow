@@ -18,9 +18,21 @@ limitations under the License.
 namespace tensorflow {
 namespace grappler {
 
+bool IsDequeueOp(const NodeDef& node) {
+  static const std::set<std::string> dequeue_ops = {
+      "QueueDequeueManyV2", "QueueDequeueMany", "QueueDequeueV2",
+      "QueueDequeue"};
+  return dequeue_ops.count(node.op()) > 0;
+}
+
 bool IsPlaceholder(const NodeDef& node) {
   const auto op = node.op();
   return op == "Placeholder" || op == "PlaceholderV2";
+}
+
+bool IsVariable(const NodeDef& node) {
+  const auto op = node.op();
+  return op == "Variable" || op == "VariableV2";
 }
 
 }  // end namespace grappler

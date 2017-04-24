@@ -21,7 +21,9 @@ limitations under the License.
 namespace tensorflow {
 namespace grappler {
 
+bool IsDequeueOp(const NodeDef& node);
 bool IsPlaceholder(const NodeDef& node);
+bool IsVariable(const NodeDef& node);
 
 }  // end namespace grappler
 }  // end namespace tensorflow

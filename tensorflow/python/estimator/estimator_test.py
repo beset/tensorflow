@@ -18,10 +18,12 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import functools
 import os
 import tempfile
 
 import numpy as np
+import six
 
 from google.protobuf import text_format
 
@@ -38,6 +40,7 @@ from tensorflow.python.framework import ops
 from tensorflow.python.layers import layers
 from tensorflow.python.lib.io import file_io
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import check_ops
 from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import data_flow_ops
 from tensorflow.python.ops import init_ops
@@ -57,6 +60,9 @@ from tensorflow.python.training import saver_test_utils
 from tensorflow.python.training import session_run_hook
 from tensorflow.python.training import training
 from tensorflow.python.util import compat
+
+_TMP_DIR = '/tmp'
+_ANOTHER_TMP_DIR = '/another_tmp'
 
 
 def dummy_model_fn(features, labels, params):
@@ -122,7 +128,7 @@ class EstimatorConstructorTest(test.TestCase):
     def model_fn(features, labels, params):
       _, _, _ = features, labels, params
 
-    class FakeConfig(run_config.RunConfig):  # pylint: disable=g-wrong-blank-lines
+    class FakeConfig(run_config.RunConfig):
       pass
 
     params = {'hidden_layers': [3, 4]}
@@ -147,6 +153,61 @@ class EstimatorConstructorTest(test.TestCase):
 
     est = estimator.Estimator(model_fn=model_fn)
     self.assertTrue(est.model_dir is not None)
+
+  def test_model_dir_in_constructor(self):
+
+    def model_fn(features, labels):
+      _, _ = features, labels
+
+    est = estimator.Estimator(model_fn=model_fn, model_dir=_TMP_DIR)
+    self.assertEqual(_TMP_DIR, est.model_dir)
+
+  def test_model_dir_in_run_config(self):
+
+    class FakeConfig(run_config.RunConfig):
+
+      @property
+      def model_dir(self):
+        return _TMP_DIR
+
+    def model_fn(features, labels):
+      _, _ = features, labels
+
+    est = estimator.Estimator(model_fn=model_fn, config=FakeConfig())
+    self.assertEqual(_TMP_DIR, est.model_dir)
+
+  def test_same_model_dir_in_constructor_and_run_config(self):
+
+    class FakeConfig(run_config.RunConfig):
+
+      @property
+      def model_dir(self):
+        return _TMP_DIR
+
+    def model_fn(features, labels):
+      _, _ = features, labels
+
+    est = estimator.Estimator(
+        model_fn=model_fn, config=FakeConfig(), model_dir=_TMP_DIR)
+    self.assertEqual(_TMP_DIR, est.model_dir)
+
+  def test_different_model_dir_in_constructor_and_run_config(self):
+
+    class FakeConfig(run_config.RunConfig):
+
+      @property
+      def model_dir(self):
+        return _TMP_DIR
+
+    def model_fn(features, labels):
+      _, _ = features, labels
+
+    with self.assertRaisesRegexp(
+        ValueError,
+        'model_dir are set both in constructor and RunConfig, but '
+        'with different values'):
+      estimator.Estimator(
+          model_fn=model_fn, config=FakeConfig(), model_dir=_ANOTHER_TMP_DIR)
 
   def test_model_fn_args_must_include_features(self):
 
@@ -204,7 +265,119 @@ def model_fn_global_step_incrementer(features, labels, mode):
       train_op=state_ops.assign_add(global_step, 1))
 
 
+def _estimator_spec(
+    expected_features, expected_labels, actual_features, actual_labels, mode):
+  assert_ops = tuple([
+      check_ops.assert_equal(
+          expected_features[k], actual_features[k], name='assert_%s' % k)
+      for k in expected_features
+  ] + [
+      check_ops.assert_equal(
+          expected_labels, actual_labels, name='assert_labels')
+  ])
+  with ops.control_dependencies(assert_ops):
+    return model_fn_lib.EstimatorSpec(
+        mode=mode,
+        predictions=constant_op.constant(0.),
+        loss=constant_op.constant(0.),
+        train_op=constant_op.constant(0.))
+
+
+def _make_input_fn(features, labels):
+  def _input_fn():
+    return {
+        k: constant_op.constant(v)
+        for k, v in six.iteritems(features)
+    }, constant_op.constant(labels)
+  return _input_fn
+
+
 class EstimatorTrainTest(test.TestCase):
+
+  def test_minimal_model_fn_args(self):
+    expected_features = {'x': 42., 'y': 43.}
+    expected_labels = 44.
+
+    # TODO(ptucker): We have to roll our own mock since Estimator._get_arguments
+    # doesn't work with mock fns.
+    model_fn_call_count = [0]
+
+    def _model_fn(features, labels):
+      model_fn_call_count[0] += 1
+      self.assertItemsEqual(expected_features.keys(), features.keys())
+      return _estimator_spec(
+          expected_features, expected_labels, features, labels,
+          model_fn_lib.ModeKeys.TRAIN)
+
+    with self.assertRaisesRegexp(ValueError, 'does not include params'):
+      estimator.Estimator(model_fn=_model_fn, params={'a': 'b'})
+    est = estimator.Estimator(model_fn=_model_fn, config=run_config.RunConfig())
+    self.assertEqual(0, model_fn_call_count[0])
+    est.train(
+        input_fn=_make_input_fn(expected_features, expected_labels), steps=1)
+    self.assertEqual(1, model_fn_call_count[0])
+
+  def test_all_model_fn_args(self):
+    expected_features = {'x': 42., 'y': 43.}
+    expected_labels = 44.
+    expected_params = {'some_param': 'some_value'}
+    expected_config = run_config.RunConfig()
+    expected_config.i_am_test = True
+
+    # TODO(ptucker): We have to roll our own mock since Estimator._get_arguments
+    # doesn't work with mock fns.
+    model_fn_call_count = [0]
+
+    # Note that args are all passed by keyword, so can be in any order.
+    def _model_fn(mode, params, features, labels, config):
+      model_fn_call_count[0] += 1
+      self.assertItemsEqual(expected_features.keys(), features.keys())
+      self.assertEqual(model_fn_lib.ModeKeys.TRAIN, mode)
+      self.assertEqual(expected_params, params)
+      self.assertTrue(config.i_am_test)
+      return _estimator_spec(
+          expected_features, expected_labels, features, labels, mode)
+
+    est = estimator.Estimator(
+        model_fn=_model_fn, params=expected_params, config=expected_config)
+    self.assertEqual(0, model_fn_call_count[0])
+    est.train(
+        input_fn=_make_input_fn(expected_features, expected_labels), steps=1)
+    self.assertEqual(1, model_fn_call_count[0])
+
+  def test_partial_model_fn_args(self):
+    expected_features = {'x': 42., 'y': 43.}
+    expected_labels = 44.
+    expected_params = {'some_param': 'some_value'}
+    expected_config = run_config.RunConfig()
+    expected_config.i_am_test = True
+    expected_foo = 45.
+    expected_bar = 46.
+
+    # TODO(ptucker): We have to roll our own mock since Estimator._get_arguments
+    # doesn't work with mock fns.
+    model_fn_call_count = [0]
+
+    def _model_fn(features, labels, foo, mode, params, config, bar):
+      model_fn_call_count[0] += 1
+      self.assertEqual(expected_foo, foo)
+      self.assertEqual(expected_bar, bar)
+      self.assertItemsEqual(expected_features.keys(), features.keys())
+      self.assertEqual(model_fn_lib.ModeKeys.TRAIN, mode)
+      self.assertEqual(expected_params, params)
+      self.assertTrue(config.i_am_test)
+      return _estimator_spec(
+          expected_features, expected_labels, features, labels, mode)
+    partial_model_fn = functools.partial(
+        _model_fn, foo=expected_foo, bar=expected_bar)
+
+    est = estimator.Estimator(
+        model_fn=partial_model_fn, params=expected_params,
+        config=expected_config)
+    self.assertEqual(0, model_fn_call_count[0])
+    est.train(
+        input_fn=_make_input_fn(expected_features, expected_labels), steps=1)
+    self.assertEqual(1, model_fn_call_count[0])
 
   def test_model_fn_must_return_estimator_spec(self):
 
@@ -359,7 +532,7 @@ class EstimatorTrainTest(test.TestCase):
           training_chief_hooks=[chief_hook],
           training_hooks=[hook])
 
-    class NonChiefRunConfig(run_config.RunConfig):  # pylint: disable=g-wrong-blank-lines
+    class NonChiefRunConfig(run_config.RunConfig):
       @property
       def is_chief(self):  # pylint: disable=g-wrong-blank-lines
         return False

@@ -28,6 +28,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/algebraic_simplifier.h"
 #include "tensorflow/compiler/xla/service/buffer_assignment.h"
 #include "tensorflow/compiler/xla/service/buffer_liveness.h"
+#include "tensorflow/compiler/xla/service/flatten_call_graph.h"
 #include "tensorflow/compiler/xla/service/gpu/convolution_folding.h"
 #include "tensorflow/compiler/xla/service/gpu/copy_insertion.h"
 #include "tensorflow/compiler/xla/service/gpu/fusion_merger.h"
@@ -140,7 +141,6 @@ tensorflow::Status OptimizeHloModule(HloModule* hlo_module,
                                         : TransposeFolding::OperandIndices{};
         },
         TransposeFolding::NeverFoldTranspose);
-    pipeline.AddPass<HloSubcomputationUnification>();
     pipeline.AddPass<HloCSE>(/*is_layout_sensitive=*/false);
     pipeline.AddPass<HloDCE>();
     TF_RETURN_IF_ERROR(pipeline.Run(hlo_module).status());
@@ -181,13 +181,14 @@ tensorflow::Status PrepareHloModuleForIrEmitting(
   // instruction which materializes a value).
   pipeline.AddPass<GpuCopyInsertion>();
   pipeline.AddPass<HloDCE>();
+  pipeline.AddPass<FlattenCallGraph>();
   return pipeline.Run(hlo_module).status();
 }
 
 // Invokes the ptxas tool on the given PTX string, and dumps its output.
 void DumpPtxasInfo(const string& ptx) {
-  legacy_flags::GpuCompilerFlags* flags = legacy_flags::GetGpuCompilerFlags();
-  const string ptxas_path = flags->xla_ptxas_path;
+  const string ptxas_path =
+      tensorflow::io::JoinPath(tensorflow::CudaRoot(), "bin/ptxas");
   // Do not log PTX stats if ptxas is not found at the given path.
   if (!tensorflow::Env::Default()->FileExists(ptxas_path).ok()) {
     LOG(WARNING)
